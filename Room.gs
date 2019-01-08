@@ -1,135 +1,91 @@
-(function(global){
+(function(global) {
   var Room = (function() {
-    function Room(room_id) {
-      var baseUrl = 'https://www.showroom-live.com/api/room/profile?room_id=';
-      var jsonData = JSON.parse(UrlFetchApp.fetch(baseUrl + room_id).getContentText());
-      if (jsonData['room_id'] == room_id) {
-        this.RoomId = room_id;
-        this.RoomUrlKey = jsonData['room_url_key'];
-        this.FollowerNum = jsonData['follower_num'];
-        this.RoomLevel = jsonData['room_level'];
-        this.ViewNum = jsonData['view_num'];
-        this.LiveStarted = jsonData['live_id'] > 0 ? jsonData['current_live_started_at'] : null ;
-        this.EventUrl = jsonData['event'] !== null ? jsonData['event']['url'] : null;
+    Room.name = 'Room';
+
+    function Room(room_id, param) {
+      if (room_id == null) { throw new Error("room_id is required."); }
+      if (param['room_url_key'] || param['follower_num'] || param['room_level'] || param['view_num'] || param['live_started'] || param['event_name']) {
+        this.room_id = room_id;
+        this.room_url_key = param['room_url_key'];
+        this.follower_num = param['follower_num'];
+        this.room_level = param['room_level'];
+        this.view_num = param['view_num'];
+        this.live_started = param['live_started'];
+        this.event_name = param['event_name'];
       } else {
-        throw Error('Room is not Found:' + room_id);
+        var profile_url = 'https://www.showroom-live.com/api/room/profile?room_id=';
+        var profile_json = JSON.parse(UrlFetchApp.fetch(profile_url + room_id).getContentText());
+        if (profile_json['room_id'] == room_id) {
+          this.room_id = room_id;
+          this.room_url_key = profile_json['room_url_key'];
+          this.follower_num = profile_json['follower_num'];
+          this.room_level = profile_json['room_level'];
+          this.view_num = profile_json['view_num'];
+          this.live_started = profile_json['live_id'] > 0 ? profile_json['current_live_started_at'] : null ;
+          this.event_name = profile_json['event'] !== null ? profile_json['event']['url'].split('/').slice(-1)[0] : null;
+        } else { throw Error('The Room is not Found (room_id:' + room_id + ')'); }
+      }
+      this.collected_date = param['collected_date'] || new Date();
+      this.supporters = param['supporters'] || null;
+      
+      if (param['event_points']) {
+        this.event_points = param['event_points'];
+      } else {
+        var event_url = 'https://www.showroom-live.com/api/room/event_and_support?room_id=';
+        var event_json = JSON.parse(UrlFetchApp.fetch(event_url + this.room_id).getContentText());
+        this.event_points = event_json['event'] !== null ? event_json['event']['ranking']['point'] : null;
       }
     }
-    
-    Room.prototype.getEventPoint = function() {
-      var baseUrl = 'https://www.showroom-live.com/api/room/event_and_support?room_id=';
-      var jsonData = JSON.parse(UrlFetchApp.fetch(baseUrl + this.RoomId).getContentText());
-      return jsonData['event'] == null ? null : jsonData['event']['ranking']['point'];
-    };
-    
-    Room.prototype.getEventSupporters = function() {
-      var baseUrl = 'https://www.showroom-live.com/room/event?room_id=';
-      var page = UrlFetchApp.fetch(baseUrl + this.RoomId).getContentText();
 
-      // 貢献度 Ranking のため、貢献者名 .pl-b2 クラス、得点 .ta-r クラスをそれぞれ配列に取得
-      var bodyHtml = "<!DOCTYPE html><html><body>" 
-                   + page.replace(/[\s\S]*?<section id="js-genre-section-7/, '<section id="js-genre-section-7')
-                   .replace(/<\/section>[\s\S]*?<\/script>/, '<\/section>') 
-                   + "</body></html>";
-      var bodyXml = Xml.parse(bodyHtml, true).html.body.toXmlString();
-      var docRoot = XmlService.parse(bodyXml).getRootElement();
-      var supporter_names = parser.getElementsByClassName(docRoot, "pl-b2").map(function(value){ 
-        return value.getValue(); 
-      });
-      var supporter_points = parser.getElementsByClassName(docRoot, "ta-r").map(function(value){ 
-        return parseInt(value.getValue().replace(/[\D]+/g,'')); 
-      });
-
-      // EventTotalPoints 取得のため、gs-genre-section-1 内の .f1-1 クラスを取得 
-      bodyHtml = "<!DOCTYPE html><html><body>" 
-               + page.replace(/[\s\S]*?<section id="js-genre-section-1/, '<section id="js-genre-section-1')
-               .replace(/<\/section>[\s\S]*?<\/script>/, '<\/section>') 
-               + "</body></html>";
-      bodyXml = Xml.parse(bodyHtml, true).html.body.toXmlString();
-      docRoot = XmlService.parse(bodyXml).getRootElement();
-      var EventTotalPoints = parser.getElementsByClassName(docRoot, 'fl-l')[0].getValue().replace(/[\D]+/g,'');
-
-      var Ranking = [];
-      supporter_points.shift();
-      supporter_names.forEach(function(item, index){
-        Ranking.push({"name": item, "point": parseInt(supporter_points[index]), "rank": index+1});
-      });
-      
-      // ある範囲の順位の得点を総計して返すメソッド
-      var getPointOfSupporters=(function(rank) {
-        var points = 0;
-        var ranks = [];
-        if (rank === undefined) {
-          for(i=1; i<=Object.keys(Ranking).length; i++){
-            ranks.push(i);
-          }
-        } else {
-          var toString = Object.prototype.toString;
-          function typeOf(obj){ return toString.call(obj).slice(8, -1).toLowerCase(); }
-          // rank が Number で与えらた場合は配列化する
-          switch(typeOf(rank)) {
-            case 'number':
-              ranks.push(rank);
-              break;
-            case 'array':
-              ranks = rank;
-              break;
-            default:
-              throw new Error("Type error: " + toString(rank));
-          }
-        }
-        Ranking.forEach(function(supporter){
-          ranks.forEach(function(r){
-            if(supporter['rank'] == r){ points += supporter['point']; }
+    Room.prototype.getSupporters = (function() {
+      if(this.supporters) { return this.supporters; } else {
+        var base_url = 'https://www.showroom-live.com/room/event?room_id=';
+        var page = UrlFetchApp.fetch(base_url + this.room_id).getContentText();
+        
+        // 貢献度 Ranking のため、貢献者名 .pl-b2 クラス、得点 .ta-r クラスをそれぞれ配列に取得
+        var bodyHtml = "<!DOCTYPE html><html><body>" 
+        + page.replace(/[\s\S]*?<section id="js-genre-section-7/, '<section id="js-genre-section-7')
+        .replace(/<\/section>[\s\S]*?<\/script>/, '<\/section>') 
+        + "</body></html>";
+        var docRoot = XmlService.parse(Xml.parse(bodyHtml, true).html.body.toXmlString()).getRootElement();
+        var supporter_names = getElementsByClassName_(docRoot, "pl-b2").map(function(value){ 
+          return value.getValue(); 
+        });
+        var supporter_points = getElementsByClassName_(docRoot, "ta-r").map(function(value){ 
+          return parseInt(value.getValue().replace(/[\D]+/g,'')); 
+        });
+        
+        supporter_points.shift();
+        var supporters = supporter_names.map(function(name, index) {
+          return new Supporter({
+            'name': name, 
+            'room_id': this.room_id, 
+            'event_name': this.event_name, 
+            'point': parseInt(supporter_points[index]),
+            'rank': index+1,
+            'collected_date': this.collected_date,
           });
         });
-
-        return points;
-      });
-
-      return {
-        "getPointOfSupporters": getPointOfSupporters, 
-        "Ranking": Ranking, 
-        "EventTotalPoints": EventTotalPoints,
-      };
-    };
+        this.supporters = new Supporters({
+          'supporters': supporters,
+          'room_id': this.room_id,
+          'event_name': this.event_name,
+        });
+        return this.supporters;
+      }
+    });
+    
+    Room.prototype.getId = (function() { return this.room_id; });
+    Room.prototype.getUrlKey = (function() { return this.room_url_key; });
+    Room.prototype.getFollowerNum = (function() { return this.follower_num; });
+    Room.prototype.getLevel = (function() { return this.room_level; });
+    Room.prototype.getViewNum = (function() { return this.view_num; });
+    Room.prototype.getLiveStartedDate = (function() { return this.live_started; });
+    Room.prototype.getEventName = (function() { return this.event_name; });
+    Room.prototype.getEventPoints = (function() { return this.event_points; });
+    Room.prototype.getCollectedDate = (function() { return this.collected_date; });
 
     return Room;
   })();
-
   global.Room = Room;
 })(this);
-
-/**
- * Roomクラスインスタンスの作成
- * @param {number} room_id ShowRoom のルームID
- * @return {Object} Roomクラスインスタンス
- */
-function createRoom(room_id) {
-  return new Room(room_id);
-}
-
-/**
- * Roomクラスインスタンスのイベント獲得ポイントを返す
- * @return {Number} Point イベント獲得ポイント値
- */
-function getEventPoint() {
-  throw new Error("it's a mock method for content assist");
-}
-
-/**
- * room のイベント貢献ランキングを取得する
- * @return {Object[]} {name: String, point: Number, rank: Number}
- */
-function getEventSupporters() {
-  throw new Error("it's a mock method for content assist");
-}
-
-/**
- * getEventSupporters で取得されたオブジェクト内の Ranking 配列から、
- * @param {Array} 得点集計対象の順位の配列
- * @return {Number} points
- */
-function getPointOfSupporters(rank) {
-  throw new Error("it's a mock method for content assist");
-}
